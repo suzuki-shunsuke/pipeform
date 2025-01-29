@@ -84,79 +84,8 @@ func main() {
 			}
 			return ctx, nil
 		},
-		Action: func(context.Context, *cli.Command) error {
-			startTime := time.Now()
-
-			logger, err := log.NewLogger(log.Level(fset.LogLevel), fset.LogPath)
-			if err != nil {
-				fmt.Println(err)
-				os.Exit(1)
-			}
-			defer logger.Close()
-
-			teeWriter := io.Discard
-			if path := fset.TeePath; path != "" {
-				f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
-				if err != nil {
-					return fmt.Errorf("open for tee: %v", err)
-				}
-				teeWriter = f
-				defer f.Close()
-			}
-
-			reader := reader.NewReader(os.Stdin, teeWriter)
-
-			type Model interface {
-				ToCsv() []byte
-				IsEOF() bool
-			}
-
-			var model Model
-
-			if fset.PlainUI {
-				m := plainui.NewRuntimeModel(logger, reader, os.Stdout, startTime)
-				if err := m.Run(); err != nil {
-					return fmt.Errorf("Error running program: %v\n", err)
-				}
-
-				model = m
-			} else {
-				m := ui.NewRuntimeModel(logger, reader, startTime)
-				tm, err := tea.NewProgram(m, tea.WithInputTTY(), tea.WithAltScreen()).Run()
-				if err != nil {
-					return fmt.Errorf("Error running program: %v\n", err)
-				}
-
-				m = tm.(ui.UIModel)
-
-				// Print diags
-				for _, diag := range m.Diags() {
-					if b, err := json.MarshalIndent(diag, "", "  "); err == nil {
-						fmt.Fprintln(os.Stderr, string(b))
-					}
-				}
-
-				model = m
-			}
-
-			if path := fset.TimeCsv; path != "" {
-				f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-				if err != nil {
-					return fmt.Errorf("open time csv file: %v", err)
-				}
-				defer f.Close()
-
-				if _, err := f.Write(model.ToCsv()); err != nil {
-					fmt.Fprintf(os.Stderr, "writing time csv file: %v", err)
-				}
-			}
-
-			if !model.IsEOF() {
-				fmt.Fprintln(os.Stderr, "Interrupted!")
-				os.Exit(1)
-			}
-
-			return nil
+		Action: func(ctx context.Context, c *cli.Command) error {
+			return action(ctx)
 		},
 	}
 
@@ -164,4 +93,97 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func action(ctx context.Context) error {
+	r := NewRunner(&fset)
+	return r.Run(ctx)
+}
+
+type Runner struct {
+	Options   *FlagSet
+	StartTime time.Time
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+}
+
+func NewRunner(opts *FlagSet) *Runner {
+	return &Runner{
+		Options:   opts,
+		StartTime: time.Now(),
+		Stdin:     os.Stdin,
+		Stdout:    os.Stdout,
+		Stderr:    os.Stderr,
+	}
+}
+
+func (r *Runner) Run(_ context.Context) error {
+	logger, err := log.NewLogger(log.Level(fset.LogLevel), fset.LogPath)
+	if err != nil {
+		return err
+	}
+	defer logger.Close()
+	teeWriter := io.Discard
+	if path := fset.TeePath; path != "" {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open for tee: %v", err)
+		}
+		teeWriter = f
+		defer f.Close()
+	}
+
+	reader := reader.NewReader(r.Stdin, teeWriter)
+
+	type Model interface {
+		ToCsv() []byte
+		IsEOF() bool
+	}
+
+	var model Model
+
+	if fset.PlainUI {
+		m := plainui.NewRuntimeModel(logger, reader, r.Stdout, r.StartTime)
+		if err := m.Run(); err != nil {
+			return fmt.Errorf("Error running program: %v\n", err)
+		}
+
+		model = m
+	} else {
+		m := ui.NewRuntimeModel(logger, reader, r.StartTime)
+		tm, err := tea.NewProgram(m, tea.WithInputTTY(), tea.WithAltScreen()).Run()
+		if err != nil {
+			return fmt.Errorf("Error running program: %v\n", err)
+		}
+
+		m = tm.(ui.UIModel)
+
+		// Print diags
+		for _, diag := range m.Diags() {
+			if b, err := json.MarshalIndent(diag, "", "  "); err == nil {
+				fmt.Fprintln(r.Stderr, string(b))
+			}
+		}
+
+		model = m
+	}
+
+	if path := fset.TimeCsv; path != "" {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			return fmt.Errorf("open time csv file: %v", err)
+		}
+		defer f.Close()
+
+		if _, err := f.Write(model.ToCsv()); err != nil {
+			fmt.Fprintf(r.Stderr, "writing time csv file: %v", err)
+		}
+	}
+
+	if !model.IsEOF() {
+		return errors.New("Interrupted!")
+	}
+
+	return nil
 }
